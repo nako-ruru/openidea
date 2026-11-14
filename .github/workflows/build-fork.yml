@@ -2,6 +2,13 @@ name: Build fork (Windows x64)
 
 on:
   workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to build"
+        required: false
+        default: "fix/android-jdtls-sdk-sources"
+  push:
+    branches: ["fix/android-jdtls-sdk-sources"]
 
 permissions:
   contents: write
@@ -11,6 +18,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.branch || github.ref_name }}
       - uses: pnpm/action-setup@v5
         with: { version: 11 }
       - uses: actions/setup-node@v5
