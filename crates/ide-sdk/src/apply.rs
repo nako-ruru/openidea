@@ -533,6 +533,78 @@ pub fn configure_gradle_runtime(cfg: &mut LanguageServerConfig, root: &Path, bui
 
 /// Maven options from settings, placed before the goals: `-s <settings.xml>`,
 /// `-t <toolchains.xml>`, `-Dmaven.repo.local=<dir>`, `-T <count>` and `-P <profiles>`.
+/// Android SDK root, resolved from `ANDROID_HOME` / `ANDROID_SDK_ROOT` and the
+/// usual per-platform install locations.
+pub fn android_sdk_root() -> Option<PathBuf> {
+    let mut roots: Vec<PathBuf> = ["ANDROID_HOME", "ANDROID_SDK_ROOT"]
+        .iter()
+        .filter_map(|key| std::env::var_os(key).map(PathBuf::from))
+        .collect();
+    if cfg!(windows) {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            roots.push(local.join("Android").join("Sdk"));
+        }
+    } else if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        roots.push(home.join("Library").join("Android").join("sdk"));
+        roots.push(home.join("Android").join("Sdk"));
+    }
+    roots.into_iter().find(|r| r.join("platforms").is_dir())
+}
+
+/// Inject the Android SDK's `android.jar` (with its source attachment) into jdtls
+/// settings so `Activity`-derived methods such as `finish()` resolve to the SDK
+/// sources. Best-effort: only runs when an SDK is found.
+pub fn configure_android_sdk(
+    cfg: &mut LanguageServerConfig,
+    _root: &Path,
+    _server_root: &Path,
+) {
+    if cfg.name != "jdtls" {
+        return;
+    }
+    let Some(sdk) = android_sdk_root() else { return };
+    let platforms = sdk.join("platforms");
+    let Ok(entries) = std::fs::read_dir(&platforms) else { return };
+    let mut platform_dirs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.join("android.jar").is_file())
+        .collect();
+    platform_dirs.sort();
+    let Some(platform) = platform_dirs.last().cloned() else { return };
+    let jar = platform.join("android.jar");
+    let jar_str = jar.to_string_lossy().replace('\\', "/");
+    let sources_dir = sdk.join("sources");
+    let source_attach = std::fs::read_dir(&sources_dir).ok().and_then(|entries| {
+        let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        dirs.sort();
+        dirs.last().cloned()
+    });
+
+    let mut settings = cfg.settings.take().unwrap_or_else(|| json!({}));
+    let existing = settings["java"]["project"]["referencedLibraries"].clone();
+    let mut libraries = if existing.is_object() {
+        existing
+    } else if existing.is_array() {
+        json!({"include": existing})
+    } else {
+        json!({"include": []})
+    };
+    let mut include: Vec<Value> = libraries["include"].as_array().cloned().unwrap_or_default();
+    let jar_val = json!(jar_str.clone());
+    if !include.contains(&jar_val) {
+        include.push(jar_val);
+    }
+    libraries["include"] = json!(include);
+    if let Some(src) = source_attach {
+        let mut attachments = libraries["sources"].as_object().cloned().unwrap_or_default();
+        attachments.insert(jar_str, json!(src.to_string_lossy().replace('\\', "/")));
+        libraries["sources"] = json!(attachments);
+    }
+    settings["java"]["project"]["referencedLibraries"] = libraries;
+    cfg.settings = Some(settings);
+}
+
 pub fn maven_options(root: &Path, s: &Settings) -> Vec<String> {
     let m = &s.languages.java.maven;
     let mut out = Vec::new();

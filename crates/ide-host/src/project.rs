@@ -219,6 +219,7 @@ impl Host {
                         ),
                     );
                     ide_lsp::jdtls::configure_project_structure(cfg, root, server_root, &effective.project_structure);
+                    ide_sdk::apply::configure_android_sdk(cfg, root, server_root);
                     let bundles: Vec<PathBuf> = ide_tools::managed_bundle(&data_dir, "java-debug")
                         .into_iter()
                         .chain(ide_sdk::java::usages_bundle(&data_dir))
