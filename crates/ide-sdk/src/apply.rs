@@ -596,11 +596,6 @@ pub fn configure_android_sdk(
         include.push(jar_val);
     }
     libraries["include"] = json!(include);
-    if let Some(src) = source_attach {
-        let mut attachments = libraries["sources"].as_object().cloned().unwrap_or_default();
-        attachments.insert(jar_str, json!(src.to_string_lossy().replace('\\', "/")));
-        libraries["sources"] = json!(attachments);
-    }
     settings["java"]["project"]["referencedLibraries"] = libraries;
     cfg.settings = Some(settings);
 }
