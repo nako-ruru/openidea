@@ -551,15 +551,50 @@ pub fn android_sdk_root() -> Option<PathBuf> {
     roots.into_iter().find(|r| r.join("platforms").is_dir())
 }
 
-/// Inject the Android SDK's `android.jar` (with its source attachment) into jdtls
-/// settings so `Activity`-derived methods such as `finish()` resolve to the SDK
-/// sources. Best-effort: only runs when an SDK is found.
+fn is_android_project_path(root: &Path, server_root: &Path) -> bool {
+    let check = |dir: &Path| -> bool {
+        if dir.join("AndroidManifest.xml").is_file() {
+            return true;
+        }
+        for name in ["build.gradle", "build.gradle.kts"] {
+            if let Ok(text) = std::fs::read_to_string(dir.join(name))
+                && (text.contains("com.android") || text.contains("android {") || text.contains("android{"))
+            {
+                return true;
+            }
+        }
+        false
+    };
+    if check(root) || check(server_root) {
+        return true;
+    }
+    for base in [root, server_root] {
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() && check(&p) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Inject the Android SDK's `android.jar` (binary only, NO source attachment) into
+/// jdtls settings so `Activity`-derived methods such as `finish()` resolve to the
+/// SDK classes (jdtls decompiles them for navigation). Best-effort: only runs for
+/// Android projects and only when an SDK is found. Source attachment is deliberately
+/// omitted to avoid indexing the huge SDK source tree (which froze the UI).
 pub fn configure_android_sdk(
     cfg: &mut LanguageServerConfig,
-    _root: &Path,
-    _server_root: &Path,
+    root: &Path,
+    server_root: &Path,
 ) {
     if cfg.name != "jdtls" {
+        return;
+    }
+    if !is_android_project_path(root, server_root) {
         return;
     }
     let Some(sdk) = android_sdk_root() else { return };
@@ -573,13 +608,7 @@ pub fn configure_android_sdk(
     platform_dirs.sort();
     let Some(platform) = platform_dirs.last().cloned() else { return };
     let jar = platform.join("android.jar");
-    let jar_str = jar.to_string_lossy().replace('\\', "/");
-    let sources_dir = sdk.join("sources");
-    let source_attach = std::fs::read_dir(&sources_dir).ok().and_then(|entries| {
-        let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
-        dirs.sort();
-        dirs.last().cloned()
-    });
+    let jar_str = jar.to_string_lossy().replace('\\\\', "/");
 
     let mut settings = cfg.settings.take().unwrap_or_else(|| json!({}));
     let existing = settings["java"]["project"]["referencedLibraries"].clone();
