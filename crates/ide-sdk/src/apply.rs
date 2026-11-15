@@ -608,7 +608,7 @@ pub fn configure_android_sdk(
     platform_dirs.sort();
     let Some(platform) = platform_dirs.last().cloned() else { return };
     let jar = platform.join("android.jar");
-    let jar_str = jar.to_string_lossy().replace('\\\\', "/");
+    let jar_str = jar.to_string_lossy().replace('\\', "/");
 
     let mut settings = cfg.settings.take().unwrap_or_else(|| json!({}));
     let existing = settings["java"]["project"]["referencedLibraries"].clone();
