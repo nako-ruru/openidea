@@ -1,93 +1,14 @@
 use super::{ProjectRoots, RootKind};
 use ide_core::settings::ProjectStructureSettings;
-use std::path::{Component, Path, PathBuf};
-
-/// Whether this looks like an Android project.
-fn is_android_project(server_root: &Path) -> bool {
-    if server_root.join("AndroidManifest.xml").is_file() {
-        return true;
-    }
-    for name in ["build.gradle", "build.gradle.kts"] {
-        if let Ok(text) = std::fs::read_to_string(server_root.join(name))
-            && (text.contains("com.android") || text.contains("android {") || text.contains("android{"))
-        {
-            return true;
-        }
-    }
-    if let Ok(entries) = std::fs::read_dir(server_root) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                if p.join("AndroidManifest.xml").is_file() {
-                    return true;
-                }
-                for name in ["build.gradle", "build.gradle.kts"] {
-                    if let Ok(text) = std::fs::read_to_string(p.join(name))
-                        && (text.contains("com.android") || text.contains("android {") || text.contains("android{"))
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
+use std::path::{Component, Path};
 
 /// Source paths for jdtls's unmanaged project, relative to its workspace folder.
 /// Maven, Gradle and Eclipse own their source model; other layouts retain jdtls inference.
-/// Android projects are treated as unmanaged so jdtls doesn't run the heavy Gradle
-/// import (which freezes the UI); their source roots are collected manually.
 pub fn unmanaged_java_source_paths(
     project: &Path,
     server_root: &Path,
     settings: &ProjectStructureSettings,
 ) -> Option<Vec<String>> {
-    if is_android_project(server_root) {
-        let mut paths: Vec<String> = Vec::new();
-        let mut stack: Vec<PathBuf> = vec![server_root.to_path_buf()];
-        for _ in 0..8 {
-            let mut next: Vec<PathBuf> = Vec::new();
-            for dir in &stack {
-                if let Ok(entries) = std::fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        let p = entry.path();
-                        if p.is_dir() {
-                            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                            if p.ends_with("src/main/java") || p.ends_with("src\\main\\java")
-                                || p.ends_with("src/main/kotlin") || p.ends_with("src\\main\\kotlin")
-                            {
-                                if let Ok(rel) = p.strip_prefix(server_root) {
-                                    let s = rel.to_string_lossy().replace('\\', "/");
-                                    if !paths.contains(&s) {
-                                        paths.push(s);
-                                    }
-                                }
-                            } else if name != "build" && name != ".gradle" && name != ".git"
-                                && name != "node_modules" && !name.starts_with('.')
-                            {
-                                next.push(p);
-                            }
-                        }
-                    }
-                }
-            }
-            stack = next;
-            if stack.is_empty() {
-                break;
-            }
-        }
-        if paths.is_empty() {
-            if server_root.join("src/main/java").is_dir() {
-                paths.push("src/main/java".into());
-            }
-            if server_root.join("src/main/kotlin").is_dir() {
-                paths.push("src/main/kotlin".into());
-            }
-        }
-        return if paths.is_empty() { None } else { Some(paths) };
-    }
-
     if ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", ".project"]
         .iter()
         .any(|name| server_root.join(name).is_file())
@@ -108,6 +29,8 @@ pub fn unmanaged_java_source_paths(
         })
         .collect();
     if paths.is_empty() {
+        // jdtls can infer the package directory itself as a source root. Give
+        // conventional layouts an unambiguous base without guessing other layouts.
         paths = ["src/main/java", "src/test/java"]
             .into_iter()
             .filter(|p| server_root.join(p).is_dir())
@@ -118,4 +41,71 @@ pub fn unmanaged_java_source_paths(
         }
     }
     (!paths.is_empty()).then_some(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marked_sources_and_tests_are_relative_to_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = ProjectStructureSettings {
+            source_roots: vec!["./app/generated/".into(), "other/src".into(), "../outside".into()],
+            test_roots: vec!["app/tests".into()],
+            resource_roots: vec!["app/resources".into()],
+            excluded: vec!["app/out".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            unmanaged_java_source_paths(dir.path(), &dir.path().join("app"), &settings),
+            Some(vec!["generated".into(), "tests".into()])
+        );
+        let settings = ProjectStructureSettings { source_roots: vec![".".into()], ..Default::default() };
+        assert_eq!(unmanaged_java_source_paths(dir.path(), dir.path(), &settings), Some(vec![".".into()]));
+    }
+
+    #[test]
+    fn conventional_layouts_and_other_unmarked_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let settings = ProjectStructureSettings::default();
+        assert_eq!(unmanaged_java_source_paths(root, root, &settings), None);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        assert_eq!(unmanaged_java_source_paths(root, root, &settings), Some(vec!["src".into()]));
+        std::fs::create_dir_all(root.join("src/main/java")).unwrap();
+        std::fs::create_dir_all(root.join("src/test/java")).unwrap();
+        assert_eq!(
+            unmanaged_java_source_paths(root, root, &settings),
+            Some(vec!["src/main/java".into(), "src/test/java".into()])
+        );
+        let settings = ProjectStructureSettings { source_roots: vec!["custom".into()], ..settings };
+        assert_eq!(unmanaged_java_source_paths(root, root, &settings), Some(vec!["custom".into()]));
+    }
+
+    #[test]
+    fn ant_projects_use_unmanaged_source_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("build.xml"), "<project/>\n").unwrap();
+        std::fs::create_dir_all(root.join("src/com/acme")).unwrap();
+        let settings = ProjectStructureSettings::default();
+        assert_eq!(unmanaged_java_source_paths(root, root, &settings), Some(vec!["src".into()]));
+        let settings = ProjectStructureSettings { source_roots: vec!["src".into(), "generated".into()], ..settings };
+        assert_eq!(unmanaged_java_source_paths(root, root, &settings), Some(vec!["generated".into(), "src".into()]));
+    }
+
+    #[test]
+    fn managed_projects_keep_their_build_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let settings = ProjectStructureSettings { source_roots: vec!["custom".into()], ..Default::default() };
+        for marker in
+            ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", ".project"]
+        {
+            std::fs::write(root.join(marker), "").unwrap();
+            assert_eq!(unmanaged_java_source_paths(root, root, &settings), None, "{marker}");
+            std::fs::remove_file(root.join(marker)).unwrap();
+        }
+    }
 }

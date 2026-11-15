@@ -626,11 +626,6 @@ pub fn configure_android_sdk(
     }
     libraries["include"] = json!(include);
     settings["java"]["project"]["referencedLibraries"] = libraries;
-    // Disable Gradle import for Android projects: AGP's model import is incomplete in
-    // jdtls and freezes the UI; we provide source roots + android.jar manually above.
-    let mut gradle = settings["java"]["import"]["gradle"].as_object().cloned().unwrap_or_default();
-    gradle.insert("enabled".into(), json!(false));
-    settings["java"]["import"]["gradle"] = json!(gradle);
     cfg.settings = Some(settings);
 }
 
