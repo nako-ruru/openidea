@@ -25,7 +25,13 @@ export function untitledTitle(uri: string): string {
   return isUntitledUri(uri) ? uri.slice(UNTITLED_SCHEME.length) : uri;
 }
 
-/** A file at a Git revision, as the VCS views open it: `git-revision:<hex of its JSON>/<name>`. */
+/** URI of a file at a Git revision, as the VCS views open it: `git-revision:<hex of its JSON>/<name>`. */
+export function gitRevisionUri(repo: string, revision: string, path: string): string {
+  const bytes = new TextEncoder().encode(JSON.stringify({ repo, revision, path }));
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `git-revision:${hex}/${encodeURIComponent(path.split("/").at(-1)!)}`;
+}
+
 export function gitRevisionOf(uri: string): { repo: string; revision: string; path: string } | null {
   const hex = /^git-revision:([0-9a-fA-F]+)\//.exec(uri)?.[1];
   if (!hex || hex.length % 2) return null;

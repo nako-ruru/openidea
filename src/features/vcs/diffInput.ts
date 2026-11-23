@@ -3,12 +3,13 @@ import type { ChangedFile, FileStatus, RevisionChange } from "@/bindings";
 import { COMBINED_DIFF_KIND, combinedOf, type CombinedDiffData } from "./allInOneDiff";
 import { call, commands, type LineEnding } from "@/platform/ipc";
 import { tx } from "@/platform/i18n";
+import { gitRevisionUri } from "@/platform/virtualDocs";
 import { workflowSettings } from "@/platform/workflowSettings";
 import { editorService, type EditorInput } from "@/workbench/contributions";
 import { baseName, effectiveKind } from "./model";
 import { readWorkingText } from "./ops";
 import { changeFileNodes, groupFileNodes, renamedFromPath, stagingSide, type ChangeNode } from "./changes";
-import { currentRepoRoot, statusOf } from "./store";
+import { currentRepoRoot, repoOf, statusOf } from "./store";
 import { repositoryPath } from "./repositoryPaths";
 import { stagingAreaOn } from "./staging";
 import { stagingVersions } from "./stagingVersions";
@@ -415,6 +416,18 @@ export const sideFile = (s: DiffSide, path: string): string | null =>
   s.type === "worktree" ? path : s.type === "file" ? s.path : null;
 export const isIndex = (s: DiffSide): s is Extract<DiffSide, { type: "rev" }> & { rev: ":0" | ":" } =>
   s.type === "rev" && (s.rev === ":0" || s.rev === ":");
+
+/**
+ * Document to open for a diff side so its pane gets the language server's navigation,
+ * like the side's editor. Revisions open as read-only `git-revision:` documents; the index
+ * has its own staged document and the remaining sides have no document.
+ */
+export function sideDocumentUri(s: DiffSide, path: string): string | null {
+  if (s.type !== "rev" || isIndex(s)) return sideFile(s, path);
+  const file = s.path ?? path;
+  const repo = repoOf(file);
+  return repo ? gitRevisionUri(repo, s.rev, file.slice(repo.length + 1)) : null;
+}
 
 /** The dominant line ending of `text` (`lf` for ties and no breaks), like the backend's detection. */
 export function detectLineEnding(text: string): LineEnding {

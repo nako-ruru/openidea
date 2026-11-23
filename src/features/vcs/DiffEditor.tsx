@@ -30,7 +30,13 @@ import {
   Chunk,
 } from "@codemirror/merge";
 import { useStore } from "zustand";
-import { attachDocument, diffSideExtensions, embeddedEditorExtensions, type DocumentAttachment } from "@/editor/api";
+import {
+  attachDocument,
+  diffSideExtensions,
+  embeddedEditorExtensions,
+  type DocumentAttachment,
+  type EditorDocContext,
+} from "@/editor/api";
 import { findChangedRanges, setFindOpen } from "@/editor/core/cm/find";
 import { softWrapActive } from "@/editor/core/cm/prefs";
 import { FindPanel, searchAgain, seedFind, type FindTarget } from "@/editor/core/view/FindBar";
@@ -97,6 +103,7 @@ import {
   openDiff,
   readDiffSide,
   rememberDiffCaret,
+  sideDocumentUri,
   sideFile,
   sideKey,
   sideLabel,
@@ -278,12 +285,12 @@ const NO_CONTRIBUTIONS: DiffViewerContribution[] = [];
 /** A file without a language; one value, so finding none again doesn't rebuild the views. */
 const NO_LANGUAGE: Extension = [];
 
-/** Joins the open document of a file-backed side (working file, Compare Files); null for revisions / texts. */
+/** Joins the side's open document: the working file, or a read-only document of a Git revision. */
 async function attachSide(side: DiffSide, path: string): Promise<DocumentAttachment | null> {
-  const file = sideFile(side, path);
-  if (!file) return null;
+  const uri = sideDocumentUri(side, path);
+  if (!uri) return null;
   try {
-    return await attachDocument(file);
+    return await attachDocument(uri);
   } catch {
     return null;
   }
@@ -721,6 +728,14 @@ function TwoPaneDiff({
     // One side alone has no words to compare: IDEA tints its lines, without fragments.
     const highlightChanges = opts.highlight === "words" && !single;
     const inclusion = includable ? inclusionGutter(path, textA) : [];
+    // A revision's document is keyed by its virtual URI, but relative links and index
+    // fallbacks must resolve against the file the pane shows, not that URI.
+    const navContext = (att: DocumentAttachment, key: Side): EditorDocContext => {
+      const ctx = att.context();
+      const shown = key === "a" ? left : right;
+      // The pane resolves links like the file's editor, not like a library document.
+      return shown.type === "rev" && !isIndex(shown) ? { ...ctx, path: shown.path ?? path, virtual: false } : ctx;
+    };
     const side = (
       att: DocumentAttachment | null,
       editable: boolean,
@@ -746,7 +761,7 @@ function TwoPaneDiff({
       blameSlot(),
       att?.extension ?? [],
       // The file's open document: quick docs and ⌘/Ctrl-click navigation, as in its editor.
-      att ? [diffSideExtensions(att.context()), documentTooltips] : [],
+      att ? [diffSideExtensions(navContext(att, key)), documentTooltips] : [],
       editable ? [stage && key === indexSide ? [] : editableExtensions(), embeddedEditorExtensions(path)] : [],
       diffAnnotations(
         (data.annotations ?? []).filter((n) => n.side === notes),

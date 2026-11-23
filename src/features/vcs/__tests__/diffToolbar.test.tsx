@@ -34,19 +34,27 @@ vi.mock("@/workbench/contributions", async (importOriginal) => ({
 
 vi.mock("@/editor/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/editor/api")>()),
-  attachDocument: (path: string) =>
-    Promise.resolve({
+  attachDocument: (path: string) => {
+    const revision = path.startsWith("git-revision:");
+    return Promise.resolve({
       path,
-      text: () => working,
+      text: () => (revision ? texts.HEAD : working),
       lineEnding: () => workingEol,
-      readOnly: false,
+      readOnly: revision,
       subscribeReadOnly: () => () => {},
       subscribeExternalChanges: () => () => {},
       extension: [],
-      context: () => ({ doc: 1, path, language: "plaintext", uiMode: null, readOnly: false }),
+      context: () => ({
+        doc: revision ? 2 : 1,
+        path,
+        language: "plaintext",
+        uiMode: null,
+        readOnly: revision,
+      }),
       save: () => Promise.resolve(),
       release: () => {},
-    }),
+    });
+  },
 }));
 
 import { DiffEditor, mapLine } from "../DiffEditor";
@@ -201,11 +209,13 @@ describe("Diff toolbar", () => {
     expect(screen.queryByText("Contents differ only in line separators")).toBeNull();
   });
 
-  it("gives the working-copy pane its document's navigation, and the revision pane none", async () => {
+  it("gives both panes their documents' navigation, resolving a revision's links against its file", async () => {
     const { registerEditorContribution } = await import("@/editor/api");
-    const marked = EditorView.contentAttributes.of({ "data-diff-doc": "1" });
-    const diffExtensions = vi.fn(() => marked);
+    const marked = (doc: number) => EditorView.contentAttributes.of({ "data-diff-doc": String(doc) });
+    const diffExtensions = vi.fn((ctx: { doc: number }) => marked(ctx.doc));
     const off = registerEditorContribution({ id: "test.diffSide", extensions: () => [], diffExtensions });
+    const before = useVcs.getState();
+    useVcs.setState({ roots: ["/p"] });
     texts.HEAD = "a\n";
     working = "b\n";
     const mounted = render(
@@ -221,12 +231,13 @@ describe("Diff toolbar", () => {
     try {
       await waitFor(() => expect(mounted.container.querySelectorAll(".cm-editor")).toHaveLength(2));
       const [left, right] = mounted.container.querySelectorAll(".cm-content");
-      expect(left!.getAttribute("data-diff-doc")).toBeNull();
+      expect(left!.getAttribute("data-diff-doc")).toBe("2");
       expect(right!.getAttribute("data-diff-doc")).toBe("1");
-      expect(diffExtensions).toHaveBeenCalledWith(expect.objectContaining({ doc: 1, path: "/p/a.ts" }));
+      expect(diffExtensions).toHaveBeenCalledWith(expect.objectContaining({ doc: 2, path: "/p/a.ts", virtual: false }));
     } finally {
       mounted.unmount();
       off();
+      useVcs.setState({ roots: before.roots });
     }
   });
 
