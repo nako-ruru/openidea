@@ -938,11 +938,11 @@ impl Project {
     /// own configuration in a separate manager, started on the first jump and
     /// stopped after five idle minutes.
     pub fn revision_lsp(&self) -> Arc<LspManager> {
-        let mut current = self.revision_lsp.lock().unwrap();
+        let mut current = self.revision_lsp.lock();
         if let Some(revision) = current.as_ref()
             && !revision.manager.is_shutdown()
         {
-            *revision.last_used.lock().unwrap() = Instant::now();
+            *revision.last_used.lock() = Instant::now();
             return revision.manager.clone();
         }
         let manager = self.lsp.shadow();

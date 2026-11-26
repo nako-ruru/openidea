@@ -603,18 +603,13 @@ impl LspManager {
     /// Stops this manager's servers once `last_used` has been idle for `idle`.
     /// The revision manager uses it: reviewing happens in bursts, and a second
     /// server should not outlive them.
-    pub fn stop_when_idle(
-        self: &Arc<Self>,
-        idle: Duration,
-        last_used: Arc<std::sync::Mutex<std::time::Instant>>,
-    ) {
+    pub fn stop_when_idle(self: &Arc<Self>, idle: Duration, last_used: Arc<Mutex<std::time::Instant>>) {
         let weak = Arc::downgrade(self);
         self.runtime.spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 let Some(manager) = weak.upgrade() else { return };
-                let idle_for = last_used.lock().map(|t| t.elapsed()).unwrap_or_default();
-                if idle_for < idle {
+                if last_used.lock().elapsed() < idle {
                     continue;
                 }
                 manager.shutdown_all().await;
