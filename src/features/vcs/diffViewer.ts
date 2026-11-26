@@ -16,6 +16,8 @@ export function activateDiffViewer(): () => void {
   const single = registerEditorKind({
     kind: DIFF_KIND,
     standalone: true,
+    // Switching tabs must not unmount the panes: their scroll offsets would reset.
+    keepAlive: true,
     component: lazyComponent(() => import("./diff-editor-tab").then((m) => m.DiffEditorTab)),
     title: (input) => diffTitle(input.data as DiffData),
     icon: () => "diff",
@@ -25,6 +27,8 @@ export function activateDiffViewer(): () => void {
   const combined = registerEditorKind({
     kind: COMBINED_DIFF_KIND,
     standalone: true,
+    // Same as the single diff: keep the panes mounted (and scrolled) while hidden.
+    keepAlive: true,
     component: lazyComponent(() => import("./CombinedDiff").then((m) => m.CombinedDiffTab)),
     title: (input) => (input.data as CombinedDiffData).title ?? tx("Combined Changes Diff"),
     document: (input) => ((input.data as CombinedDiffData).items.some(stagedDiffPath) ? combinedStaged : undefined),
