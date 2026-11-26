@@ -1812,7 +1812,23 @@ pub async fn lsp_semantic_tokens(host: &Host, window: &str, doc: DocId) -> IdeRe
         let uri = uri.to_string_lossy();
         if uri.starts_with("git-revision:") {
             let Some(lsp) = revision_lsp_doc(host, window, doc, &uri).await? else { return Ok(None) };
-            return lsp.semantic_tokens(doc).await;
+            // A fresh revision server loads the workspace before it can answer;
+            // a request made meanwhile times out (10 s) and would leave the pane
+            // colourless. Ask again with a growing pause until it answers.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            let mut pause = std::time::Duration::from_millis(500);
+            loop {
+                let result = lsp.semantic_tokens(doc).await;
+                let empty = match &result {
+                    Ok(Some(tokens)) => tokens.data.is_empty(),
+                    _ => true,
+                };
+                if !empty || std::time::Instant::now() >= deadline {
+                    return result;
+                }
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(std::time::Duration::from_secs(5));
+            }
         }
     }
     let lsp = host.project(window)?.lsp.clone();
