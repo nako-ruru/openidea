@@ -947,7 +947,12 @@ impl Project {
         }
         let manager = self.lsp.shadow();
         let last_used = Arc::new(Mutex::new(Instant::now()));
-        manager.stop_when_idle(Duration::from_secs(5 * 60), last_used.clone());
+        let primary = self.lsp.clone();
+        manager.stop_when_idle(
+            Duration::from_secs(5 * 60),
+            last_used.clone(),
+            Arc::new(move || primary.has_open_revisions()),
+        );
         *current = Some(RevisionLsp { manager: manager.clone(), last_used });
         manager
     }
@@ -2090,7 +2095,8 @@ impl DocumentObserver for LspObserver {
             // A revision's blob is never opened on the project's servers: it is
             // not a file of any package, and analysing it there would make the
             // server report it as one (and collide with the worktree document).
-            Some(uri) if uri.starts_with("git-revision:") => {}
+            // It does keep the revision manager warm while the pane is open.
+            Some(uri) if uri.starts_with("git-revision:") => self.0.note_revision_open(info.id),
             Some(uri) => self.0.did_open_virtual(info.id, uri, &info.language, info.version, &info.text),
             None => self.0.did_open(info.id, &info.path, &info.language, info.version, &info.text),
         }

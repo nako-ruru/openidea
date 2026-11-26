@@ -269,6 +269,10 @@ pub struct LspManager {
     /// java-debug DAP port → the module path whose jdtls serves it.
     debug_servers: Mutex<HashMap<u16, PathBuf>>,
     configuration_cache: Arc<Mutex<jdtls::configuration::ConfigurationCache>>,
+    /// Revision panes currently open (their documents). The revision manager is
+    /// kept alive while any of them is open, so a click never pays the start-up
+    /// of a stopped server; it stops after the last one closes.
+    revision_docs: Mutex<HashSet<DocId>>,
     /// `window/showMessage` texts already surfaced; servers repeat them on every restart/reconfigure.
     shown_messages: Mutex<HashSet<(String, String)>>,
     /// go.mod files whose upgrades gopls has been asked to check this session.
@@ -568,6 +572,7 @@ impl LspManager {
             virtual_stamps: Mutex::new(HashMap::new()),
             injections: injections::State::default(),
             notebooks: Mutex::new(HashMap::new()),
+            revision_docs: Mutex::new(HashSet::new()),
         })
     }
 
@@ -600,15 +605,37 @@ impl LspManager {
         self.shutting_down.load(Ordering::Acquire)
     }
 
-    /// Stops this manager's servers once `last_used` has been idle for `idle`.
-    /// The revision manager uses it: reviewing happens in bursts, and a second
-    /// server should not outlive them.
-    pub fn stop_when_idle(self: &Arc<Self>, idle: Duration, last_used: Arc<Mutex<std::time::Instant>>) {
+    pub fn note_revision_open(&self, doc: DocId) {
+        self.revision_docs.lock().insert(doc);
+    }
+
+    pub fn note_revision_closed(&self, doc: DocId) {
+        self.revision_docs.lock().remove(&doc);
+    }
+
+    pub fn has_open_revisions(&self) -> bool {
+        !self.revision_docs.lock().is_empty()
+    }
+
+    /// Stops this manager's servers once `last_used` has been idle for `idle`
+    /// and `keep_alive` no longer asks to keep them. The revision manager uses
+    /// it: it stays warm while a revision pane is open, and stops after the
+    /// last one closes.
+    pub fn stop_when_idle(
+        self: &Arc<Self>,
+        idle: Duration,
+        last_used: Arc<Mutex<std::time::Instant>>,
+        keep_alive: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) {
         let weak = Arc::downgrade(self);
         self.runtime.spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 let Some(manager) = weak.upgrade() else { return };
+                if keep_alive() {
+                    *last_used.lock() = std::time::Instant::now();
+                    continue;
+                }
                 if last_used.lock().elapsed() < idle {
                     continue;
                 }
