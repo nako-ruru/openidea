@@ -3378,6 +3378,58 @@ impl LspManager {
         }))
     }
 
+    /// Sends a server-specific request (a method outside the protocol) to the
+    /// ready server for `language`. `text` is the document the positions in
+    /// `params` belong to, for servers that negotiate a non-UTF-16 encoding.
+    pub async fn custom_goto(
+        &self,
+        path: &Path,
+        language: &LanguageId,
+        method: &str,
+        params: Value,
+        text: &str,
+    ) -> IdeResult<Vec<Location>> {
+        let servers = self.servers_for(language, path);
+        let targets = self.ready_targets(&servers, |_| true).await;
+        let Some(t) = targets.first() else { return Ok(Vec::new()) };
+        let response: Option<lsp::GotoDefinitionResponse> =
+            self.call_retrying(t, method, params, DEFAULT_TIMEOUT).await?;
+        let revision = Arc::new(DocText::new(text));
+        let conv = Conv::new(t.enc(), move |_: &Path| Some(revision.clone()));
+        Ok(convert::goto_response(
+            &conv,
+            response.unwrap_or(lsp::GotoDefinitionResponse::Array(Vec::new())),
+        ))
+    }
+
+    /// Semantic tokens for a server-specific document (a revision's text),
+    /// using that server's legend and encoding.
+    pub async fn custom_semantic_tokens(
+        &self,
+        path: &Path,
+        language: &LanguageId,
+        method: &str,
+        params: Value,
+        text: &str,
+    ) -> IdeResult<Option<SemanticTokens>> {
+        let servers = self.servers_for(language, path);
+        let targets = self.ready_targets(&servers, |c| c.semantic_tokens_full()).await;
+        let Some(t) = targets.first() else { return Ok(None) };
+        let r: Option<Value> = self.call_retrying(t, method, params, DEFAULT_TIMEOUT).await?;
+        let Some(data) = r.as_ref().and_then(|v| v.get("data")).and_then(Value::as_array) else { return Ok(None) };
+        let data: Vec<i64> = data.iter().map(|n| n.as_i64().unwrap_or(0)).collect();
+        let (enc, legend) = {
+            let caps = t.caps();
+            (caps.encoding, caps.semantic_legend.clone().unwrap_or_default())
+        };
+        let revision = Arc::new(DocText::new(text));
+        Ok(Some(SemanticTokens {
+            data: convert::decode_semantic_tokens(&data, enc, Some(revision.as_ref())),
+            token_types: legend.0,
+            token_modifiers: legend.1,
+        }))
+    }
+
     pub async fn code_lens(&self, doc: DocId) -> IdeResult<Vec<CodeLens>> {
         let (snap, targets) = self.doc_targets(doc, "code lens", |c| c.has("codeLensProvider")).await?;
         let requests = targets.iter().map(|t| {

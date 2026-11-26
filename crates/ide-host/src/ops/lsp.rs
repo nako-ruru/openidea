@@ -409,11 +409,16 @@ async fn revision_targets(
 ) -> IdeResult<Option<Vec<Location>>> {
     let project = host.project(window)?;
     let vd = crate::ops::vcs::revision_virtual_document(host, window, uri, None).await?;
+    let path = crate::ops::vcs::revision_blob_path(uri)?;
+    // Java: the running java-analyzer analyses the revision text in place (a
+    // transient text swap), so there is no second process to start.
+    if vd.language_id.as_str() == "java" {
+        return java_revision_targets(&project, &path, &vd, pos, kind).await;
+    }
     let Some(lsp) = open_revision(&project, doc, uri, &vd) else { return Ok(None) };
     let mut targets = lsp.goto(doc, pos, kind).await?;
     // A target in the same blob carries HEAD's line numbers, while the editor
     // opens the working copy: translate them through the file's own diff.
-    let path = crate::ops::vcs::revision_blob_path(uri)?;
     if let Some(working) = working_text(&project, &path) {
         for target in &mut targets {
             if target.path.as_ref() != path.as_path() {
@@ -426,6 +431,34 @@ async fn revision_targets(
         }
     }
     Ok(Some(targets))
+}
+
+/// Java: java-analyzer analyses a revision's text in the running server, so no
+/// second process is needed. A server without the extension (jdtls) answers
+/// "method not found": no jump rather than an error.
+async fn java_revision_targets(
+    project: &std::sync::Arc<crate::Project>,
+    path: &Path,
+    vd: &ide_lsp::types::VirtualDocument,
+    pos: Pos,
+    kind: GotoKind,
+) -> IdeResult<Option<Vec<Location>>> {
+    if kind != GotoKind::Definition {
+        return Ok(None);
+    }
+    let params = serde_json::json!({
+        "path": ide_lsp::path_to_uri_string(path),
+        "text": &vd.text,
+        "position": { "line": pos.line, "character": pos.col },
+    });
+    match project
+        .lsp
+        .custom_goto(path, &vd.language_id, "java-analyzer/revisionDefinition", params, &vd.text)
+        .await
+    {
+        Ok(targets) => Ok(Some(targets)),
+        Err(_) => Ok(None),
+    }
 }
 
 #[command(trust = trusted)]
@@ -1811,6 +1844,31 @@ pub async fn lsp_semantic_tokens(host: &Host, window: &str, doc: DocId) -> IdeRe
     if let Ok((uri, _)) = host.project(window)?.documents.identity(doc) {
         let uri = uri.to_string_lossy();
         if uri.starts_with("git-revision:") {
+            let project = host.project(window)?;
+            let vd = crate::ops::vcs::revision_virtual_document(host, window, &uri, None).await?;
+            // Java: the running java-analyzer answers for the revision text.
+            if vd.language_id.as_str() == "java" {
+                let path = crate::ops::vcs::revision_blob_path(&uri)?;
+                let params = serde_json::json!({
+                    "path": ide_lsp::path_to_uri_string(&path),
+                    "text": &vd.text,
+                    "position": { "line": 0, "character": 0 },
+                });
+                return match project
+                    .lsp
+                    .custom_semantic_tokens(
+                        &path,
+                        &vd.language_id,
+                        "java-analyzer/revisionSemanticTokens",
+                        params,
+                        &vd.text,
+                    )
+                    .await
+                {
+                    Ok(tokens) => Ok(tokens),
+                    Err(_) => Ok(None),
+                };
+            }
             let Some(lsp) = revision_lsp_doc(host, window, doc, &uri).await? else { return Ok(None) };
             // A fresh revision server loads the workspace before it can answer;
             // a request made meanwhile times out (10 s) and would leave the pane
