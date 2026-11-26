@@ -25,20 +25,16 @@ pub async fn doc_open_virtual(host: &Host, window: &str, uri: String) -> IdeResu
         .then(|| (vd.language_id.clone(), vd.text.clone()));
     let documents = project.documents.clone();
     let info = blocking(move || {
-        documents.open_virtual(
-            &vd.uri,
-            vd.language_id,
-            &vd.text,
-            &vd.encoding,
-            vd.has_bom,
-            vd.can_reload_encoding,
-        )
+        documents.open_virtual(&vd.uri, vd.language_id, &vd.text, &vd.encoding, vd.has_bom, vd.can_reload_encoding)
     })
     .await?;
     if let Some((language, text)) = warm
         && let Ok(path) = crate::ops::vcs::revision_blob_path(&uri)
     {
-        project.revision_lsp().did_open(info.id, &path, &language, info.version, &text);
+        let lsp = project.revision_lsp();
+        if !lsp.has_document(info.id) {
+            lsp.did_open(info.id, &path, &language, info.version, &text);
+        }
     }
     Ok(info)
 }
