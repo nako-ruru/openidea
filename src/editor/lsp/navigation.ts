@@ -58,7 +58,7 @@ import { executeAction } from "@/platform/actions";
 import { basename, relativePath, useProject } from "@/platform/project";
 import { fileIconName } from "@/ui";
 import { NO_SERVER, debounce, docOf, isUnavailable, lspDoc, lspRequest, reportLspError } from "./lsp";
-import { offsetToPos, posToOffset, rangeContains, rangeToOffsets } from "./positions";
+import { offsetToPos, rangeContains, rangeToOffsets } from "./positions";
 import {
   SYNTAX_NOTE,
   declarationFallback,
@@ -107,18 +107,7 @@ import {
 
 const highlightsBackoff = featureBackoff();
 
-export async function navigateTo(loc: Location, view?: EditorView) {
-  // A pane that shows this very document (a revision pane showing HEAD) keeps
-  // the jump inside itself: opening the file would use the other side's lines.
-  if (view && loc.path === docOf(view)?.path) {
-    const offset = posToOffset(view.state.doc, loc.range.start);
-    view.dispatch({
-      selection: EditorSelection.cursor(offset),
-      effects: EditorView.scrollIntoView(offset, { y: "center" }),
-    });
-    view.focus();
-    return;
-  }
+export async function navigateTo(loc: Location) {
   await openCodeLocation(loc.path, { line: loc.range.start.line, col: loc.range.start.col });
 }
 
@@ -612,7 +601,7 @@ async function gotoResolved(
           return;
         }
         if (targets.length === 1) {
-          await navigateTo(targets[0]!, view);
+          await navigateTo(targets[0]!);
           return;
         }
         openPopup({
@@ -666,7 +655,7 @@ async function gotoResolved(
       others = targets.filter((t) => !(t.path === doc.path && rangeContains(t.range, pos)));
     }
     if (others.length === 1) {
-      await navigateTo(others[0]!, view);
+      await navigateTo(others[0]!);
       return;
     }
     if (others.length > 1) {
@@ -683,7 +672,7 @@ async function gotoResolved(
     return;
   }
   if (locs.length === 1) {
-    await navigateTo(locs[0]!, view);
+    await navigateTo(locs[0]!);
     // After the editor applied the navigation's selection (which dismisses hints).
     if (fromSyntax)
       setTimeout(() => {

@@ -331,8 +331,28 @@ fn is_revision_document(host: &Host, window: &str, doc: DocId) -> bool {
         .is_some_and(|(path, _)| path.to_string_lossy().starts_with("git-revision:"))
 }
 
-/// The revision manager with `doc` open on the blob at `uri`; `None` when the
+/// Opens the revision blob at `uri` on the revision manager; `None` when the
 /// language has no revision support yet, leaving the ordinary path to answer.
+fn open_revision(
+    project: &std::sync::Arc<crate::Project>,
+    doc: DocId,
+    uri: &str,
+    vd: &ide_lsp::types::VirtualDocument,
+) -> Option<std::sync::Arc<ide_lsp::LspManager>> {
+    // Only Go for now: gopls refuses a document outside a package, so a second
+    // manager with the same configuration is the only exact answer.
+    if vd.language_id.as_str() != "go" {
+        return None;
+    }
+    let lsp = project.revision_lsp();
+    if !lsp.has_document(doc) {
+        let path = crate::ops::vcs::revision_blob_path(uri).ok()?;
+        lsp.did_open(doc, &path, &vd.language_id, 1, &vd.text);
+    }
+    Some(lsp)
+}
+
+/// The revision manager with `doc` open on the blob at `uri`.
 async fn revision_lsp_doc(
     host: &Host,
     window: &str,
@@ -341,17 +361,38 @@ async fn revision_lsp_doc(
 ) -> IdeResult<Option<std::sync::Arc<ide_lsp::LspManager>>> {
     let project = host.project(window)?;
     let vd = crate::ops::vcs::revision_virtual_document(host, window, uri, None).await?;
-    // Only Go for now: gopls refuses a document outside a package, so a second
-    // manager with the same configuration is the only exact answer.
-    if vd.language_id.as_str() != "go" {
-        return Ok(None);
+    Ok(open_revision(&project, doc, uri, &vd))
+}
+
+/// The working copy's text of `path`: the open document's (unsaved edits
+/// included), else the file on disk.
+fn working_text(project: &crate::Project, path: &Path) -> Option<String> {
+    project
+        .documents
+        .text_of(path)
+        .or_else(|| std::fs::read(path).ok().map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// The line of `new` that corresponds to 0-based `line` of `old`. A line that
+/// only the old side has lands on the line that replaced it.
+fn map_line(old: &str, new: &str, line: u32) -> u32 {
+    use similar::{Algorithm, DiffTag, capture_diff_slices};
+    let old_lines: Vec<&str> = old.split_inclusive('\n').collect();
+    let new_lines: Vec<&str> = new.split_inclusive('\n').collect();
+    let target = line as usize;
+    let (mut o, mut n) = (0usize, 0usize);
+    for op in capture_diff_slices(Algorithm::Myers, &old_lines, &new_lines) {
+        let (old_len, new_len) = (op.old_range().len(), op.new_range().len());
+        if target < o + old_len {
+            let offset = target - o;
+            let mapped =
+                if op.tag() == DiffTag::Equal { n + offset } else { n + offset.min(new_len.saturating_sub(1)) };
+            return mapped.min(new_lines.len().saturating_sub(1)) as u32;
+        }
+        o += old_len;
+        n += new_len;
     }
-    let lsp = project.revision_lsp();
-    if !lsp.has_document(doc) {
-        let path = crate::ops::vcs::revision_blob_path(uri)?;
-        lsp.did_open(doc, &path, &vd.language_id, 1, &vd.text);
-    }
-    Ok(Some(lsp))
+    new_lines.len().saturating_sub(1) as u32
 }
 
 /// Navigates inside a Git revision's blob through the revision manager: the
@@ -366,15 +407,22 @@ async fn revision_targets(
     pos: Pos,
     kind: GotoKind,
 ) -> IdeResult<Option<Vec<Location>>> {
-    let Some(lsp) = revision_lsp_doc(host, window, doc, uri).await? else { return Ok(None) };
+    let project = host.project(window)?;
+    let vd = crate::ops::vcs::revision_virtual_document(host, window, uri, None).await?;
+    let Some(lsp) = open_revision(&project, doc, uri, &vd) else { return Ok(None) };
     let mut targets = lsp.goto(doc, pos, kind).await?;
-    // A target inside the same blob stays in the revision pane: its line numbers
-    // are the HEAD version's, not the working copy's.
+    // A target in the same blob carries HEAD's line numbers, while the editor
+    // opens the working copy: translate them through the file's own diff.
     let path = crate::ops::vcs::revision_blob_path(uri)?;
-    for target in &mut targets {
-        if target.path.as_ref() == path.as_path() {
-            target.path = std::path::PathBuf::from(uri).into();
-            target.uri = None;
+    if let Some(working) = working_text(&project, &path) {
+        for target in &mut targets {
+            if target.path.as_ref() != path.as_path() {
+                continue;
+            }
+            let line = map_line(&vd.text, &working, target.range.start.line);
+            let delta = i64::from(line) - i64::from(target.range.start.line);
+            target.range.start.line = line;
+            target.range.end.line = (i64::from(target.range.end.line) + delta).max(0) as u32;
         }
     }
     Ok(Some(targets))
@@ -2925,6 +2973,23 @@ mod tests {
             assert!(plugin_completion_kind(k).is_some(), "{k:?}");
         }
         assert_eq!(plugin_completion_kind("nonsense"), None);
+    }
+
+    #[test]
+    fn revision_lines_map_to_the_working_copy() {
+        let head = "a\nb\nc\nd\ne\n";
+        let working = "a\nb\nX\nY\nc\nD1\nD2\ne\n";
+        assert_eq!(super::map_line(head, working, 0), 0);
+        assert_eq!(super::map_line(head, working, 1), 1);
+        assert_eq!(super::map_line(head, working, 2), 4);
+        assert_eq!(super::map_line(head, working, 3), 5);
+        assert_eq!(super::map_line(head, working, 4), 7);
+    }
+
+    #[test]
+    fn unchanged_files_keep_their_lines() {
+        let text = "a\nb\nc\n";
+        assert_eq!(super::map_line(text, text, 2), 2);
     }
 }
 
