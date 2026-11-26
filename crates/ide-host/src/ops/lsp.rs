@@ -372,8 +372,8 @@ async fn revision_targets(
     // are the HEAD version's, not the working copy's.
     let path = crate::ops::vcs::revision_blob_path(uri)?;
     for target in &mut targets {
-        if target.path == path {
-            target.path = std::path::PathBuf::from(uri);
+        if target.path.as_ref() == path.as_path() {
+            target.path = std::path::PathBuf::from(uri).into();
             target.uri = None;
         }
     }
