@@ -17,9 +17,15 @@ pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> IdeResult<T> + Send
 #[command(trust = always)]
 pub async fn doc_open_virtual(host: &Host, window: &str, uri: String) -> IdeResult<DocumentInfo> {
     let project = host.project(window)?;
-    let vd = crate::ops::lsp::lsp_virtual_document(host, window, uri).await?;
-    blocking(move || {
-        project.documents.open_virtual(
+    let vd = crate::ops::lsp::lsp_virtual_document(host, window, uri.clone()).await?;
+    // A revision pane's navigation is served by a separate language-server
+    // manager; warm it as the pane opens, so the first jump answers at once
+    // instead of paying the server's start-up.
+    let warm = (uri.starts_with("git-revision:") && vd.language_id.as_str() == "go")
+        .then(|| (vd.language_id.clone(), vd.text.clone()));
+    let documents = project.documents.clone();
+    let info = blocking(move || {
+        documents.open_virtual(
             &vd.uri,
             vd.language_id,
             &vd.text,
@@ -28,7 +34,13 @@ pub async fn doc_open_virtual(host: &Host, window: &str, uri: String) -> IdeResu
             vd.can_reload_encoding,
         )
     })
-    .await
+    .await?;
+    if let Some((language, text)) = warm
+        && let Ok(path) = crate::ops::vcs::revision_blob_path(&uri)
+    {
+        project.revision_lsp().did_open(info.id, &path, &language, info.version, &text);
+    }
+    Ok(info)
 }
 
 /// The language and CodeMirror mode `path` is shown with in an editor, without opening
