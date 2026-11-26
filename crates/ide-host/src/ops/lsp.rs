@@ -275,6 +275,11 @@ pub async fn lsp_hover(
     doc: DocId,
     pos: Pos,
 ) -> IdeResult<Option<Hover>> {
+    // A revision's blob is not a document of the project's servers; its pane
+    // keeps the syntax colours it always had.
+    if is_revision_document(host, window, doc) {
+        return Ok(None);
+    }
     let lsp = host.project(window)?.lsp.clone();
     let (target, cancel) = begin_position_request(host, window, request, doc, pos).await?;
     let Some((plugins, d)) = plugin_providers(host, window, doc, ProviderKind::Hover) else {
@@ -317,8 +322,55 @@ pub async fn lsp_signature_help(host: &Host, window: &str, doc: DocId, pos: Pos)
     }
 }
 
+/// Whether `doc` is a Git revision's blob (a `git-revision:` document). Such a
+/// document is analysed by the revision manager, never by the project's servers.
+fn is_revision_document(host: &Host, window: &str, doc: DocId) -> bool {
+    host.project(window)
+        .ok()
+        .and_then(|project| project.documents.identity(doc).ok())
+        .is_some_and(|(path, _)| path.to_string_lossy().starts_with("git-revision:"))
+}
+
+/// Navigates inside a Git revision's blob through the revision manager: the
+/// blob is opened at the file's real path there, so the project's own document
+/// (and its servers) stay untouched. `None` when the language has no revision
+/// support yet, leaving the ordinary path to answer.
+async fn revision_targets(
+    host: &Host,
+    window: &str,
+    doc: DocId,
+    uri: &str,
+    pos: Pos,
+    kind: GotoKind,
+) -> IdeResult<Option<Vec<Location>>> {
+    let project = host.project(window)?;
+    let vd = crate::ops::vcs::revision_virtual_document(host, window, uri, None).await?;
+    // Only Go for now: gopls refuses a document outside a package, so a second
+    // manager with the same configuration is the only exact answer.
+    if vd.language_id.as_str() != "go" {
+        return Ok(None);
+    }
+    let path = crate::ops::vcs::revision_blob_path(uri)?;
+    let lsp = project.revision_lsp();
+    if !lsp.has_document(doc) {
+        lsp.did_open(doc, &path, &vd.language_id, 1, &vd.text);
+    }
+    Ok(Some(lsp.goto(doc, pos, kind).await?))
+}
+
 #[command(trust = trusted)]
 pub async fn lsp_goto(host: &Host, window: &str, doc: DocId, pos: Pos, kind: GotoKind) -> IdeResult<Vec<Location>> {
+    // A revision pane's document has no server of its own: its blob is analysed
+    // at the file's real path by a second manager, which never shares a document
+    // with the project's servers (one URI holds one content).
+    if let Ok((uri, _)) = host.project(window)?.documents.identity(doc) {
+        let uri = uri.to_string_lossy();
+        if uri.starts_with("git-revision:") {
+            if let Some(targets) = revision_targets(host, window, doc, &uri, pos, kind).await? {
+                return Ok(targets);
+            }
+        }
+    }
     let target = position_document(host, window, doc, pos).await?;
     // ⌘B on a declaration shows its usages, also when a plugin's index links the name elsewhere
     // (a MyBatis mapper method to its XML statement): the server's answer comes along for the
@@ -1684,6 +1736,11 @@ pub async fn lsp_inlay_hints(host: &Host, window: &str, doc: DocId, range: Range
 
 #[command(trust = trusted)]
 pub async fn lsp_semantic_tokens(host: &Host, window: &str, doc: DocId) -> IdeResult<Option<SemanticTokens>> {
+    // Colour is unchanged for a revision pane: its blob has no server of its
+    // own, and tokens are not part of the revision navigation this adds.
+    if is_revision_document(host, window, doc) {
+        return Ok(None);
+    }
     let lsp = host.project(window)?.lsp.clone();
     let Some((plugins, d)) = plugin_providers(host, window, doc, ProviderKind::SemanticTokens) else {
         return lsp.semantic_tokens(doc).await;

@@ -571,6 +571,62 @@ impl LspManager {
         })
     }
 
+    /// A manager for revision snapshots: the same launch configuration, with
+    /// servers and documents of its own. A Git revision of a file is analysed
+    /// as an overlay at the file's real path, so this manager must never share
+    /// a document (or a process) with the project's own servers. Its events are
+    /// dropped: the diagnostics of a snapshot must not reach the UI.
+    pub fn shadow(&self) -> Arc<LspManager> {
+        let manager = Self::with_launcher(
+            self.project_root.clone(),
+            self.languages.clone(),
+            Arc::new(ide_core::event::NullSink),
+            self.launcher.clone(),
+        );
+        *manager.config_hook.write() = self.config_hook.read().clone();
+        *manager.prepare_hook.write() = self.prepare_hook.read().clone();
+        *manager.servers_hook.write() = self.servers_hook.read().clone();
+        *manager.candidates_hook.write() = self.candidates_hook.read().clone();
+        *manager.excludes_hook.write() = self.excludes_hook.read().clone();
+        *manager.watch_roots_hook.write() = self.watch_roots_hook.read().clone();
+        *manager.jdtls_shared_hook.write() = self.jdtls_shared_hook.read().clone();
+        *manager.content_roots.write() = self.content_roots.read().clone();
+        *manager.jdtls_import_roots.write() = self.jdtls_import_roots.read().clone();
+        manager.execution_allowed.store(self.execution_allowed.load(Ordering::Acquire), Ordering::Release);
+        manager
+    }
+
+    pub fn is_shutdown(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Stops this manager's servers once `last_used` has been idle for `idle`.
+    /// The revision manager uses it: reviewing happens in bursts, and a second
+    /// server should not outlive them.
+    pub fn stop_when_idle(
+        self: &Arc<Self>,
+        idle: Duration,
+        last_used: Arc<std::sync::Mutex<std::time::Instant>>,
+    ) {
+        let weak = Arc::downgrade(self);
+        self.runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let Some(manager) = weak.upgrade() else { return };
+                let idle_for = last_used.lock().map(|t| t.elapsed()).unwrap_or_default();
+                if idle_for < idle {
+                    continue;
+                }
+                manager.shutdown_all().await;
+                return;
+            }
+        });
+    }
+
+    pub fn has_document(&self, doc: DocId) -> bool {
+        self.docs.lock().contains_key(&doc)
+    }
+
     // ---- server lookup & lifecycle ----
 
     pub fn set_content_roots(&self, roots: Vec<PathBuf>) {

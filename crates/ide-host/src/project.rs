@@ -20,6 +20,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// The second language-server manager that analyses Git revision snapshots.
+/// Created on the first jump from a revision pane and stopped after five idle
+/// minutes: reviewing is a burst of activity, and a second server is expensive.
+struct RevisionLsp {
+    manager: Arc<LspManager>,
+    last_used: Arc<Mutex<Instant>>,
+}
+
 /// Everything bound to one open project folder.
 pub struct Project {
     pub(crate) trusted: Arc<AtomicBool>,
@@ -37,6 +45,9 @@ pub struct Project {
     pub moves: FileMoves,
     pub index: Arc<ProjectIndex>,
     pub lsp: Arc<LspManager>,
+    /// The servers that analyse Git revision snapshots ([`LspManager::shadow`]),
+    /// started on the first jump from a revision pane.
+    revision_lsp: Mutex<Option<RevisionLsp>>,
     /// Git repositories: the one containing the project root and those nested below it.
     pub repos: Arc<RwLock<Repos>>,
     /// Explicitly opened external logs remain read-only and outside project indexing.
@@ -634,6 +645,7 @@ impl Host {
             moves: FileMoves::new(),
             index,
             lsp,
+            revision_lsp: Mutex::new(None),
             repos,
             external_log_repos: RwLock::default(),
             structure: Arc::new(StructureService::new(syntax.clone())),
@@ -884,6 +896,7 @@ impl Host {
             moves: FileMoves::new(),
             index,
             lsp,
+            revision_lsp: Mutex::new(None),
             repos: Arc::default(),
             external_log_repos: RwLock::default(),
             structure: Arc::new(StructureService::new(syntax.clone())),
@@ -921,6 +934,24 @@ impl Host {
 }
 
 impl Project {
+    /// The language servers that analyse Git revision snapshots: the project's
+    /// own configuration in a separate manager, started on the first jump and
+    /// stopped after five idle minutes.
+    pub fn revision_lsp(&self) -> Arc<LspManager> {
+        let mut current = self.revision_lsp.lock().unwrap();
+        if let Some(revision) = current.as_ref()
+            && !revision.manager.is_shutdown()
+        {
+            *revision.last_used.lock().unwrap() = Instant::now();
+            return revision.manager.clone();
+        }
+        let manager = self.lsp.shadow();
+        let last_used = Arc::new(Mutex::new(Instant::now()));
+        manager.stop_when_idle(Duration::from_secs(5 * 60), last_used.clone());
+        *current = Some(RevisionLsp { manager: manager.clone(), last_used });
+        manager
+    }
+
     pub fn is_trusted(&self) -> bool {
         self.trusted.load(Ordering::Acquire)
     }
@@ -2056,6 +2087,10 @@ impl DocumentObserver for LspObserver {
             return;
         }
         match &info.uri {
+            // A revision's blob is never opened on the project's servers: it is
+            // not a file of any package, and analysing it there would make the
+            // server report it as one (and collide with the worktree document).
+            Some(uri) if uri.starts_with("git-revision:") => {}
             Some(uri) => self.0.did_open_virtual(info.id, uri, &info.language, info.version, &info.text),
             None => self.0.did_open(info.id, &info.path, &info.language, info.version, &info.text),
         }
