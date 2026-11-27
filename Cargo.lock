@@ -4528,6 +4528,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "similar",
  "specta",
  "specta-typescript",
  "tempfile",

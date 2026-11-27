@@ -1791,6 +1791,43 @@ impl LspManager {
         self.goto_in(&snap, &targets, method, pos, None, None).await
     }
 
+    /// Resolves a definition in a Git revision's text through the server's own
+    /// revision request. The server analyses that text in a snapshot of its own,
+    /// so the workspace document (and its overlays) is untouched. A server
+    /// without the request (stock gopls) answers "method not found": no jump.
+    pub async fn revision_definition(
+        &self,
+        language: &LanguageId,
+        path: &Path,
+        text: &str,
+        pos: Pos,
+    ) -> IdeResult<Vec<Location>> {
+        let servers = self.servers_for(language, path);
+        // A revision pane may be the only Go view open: start the project's
+        // server rather than answering "no jump" just because nothing else did.
+        for server in &servers {
+            self.ensure_started(server);
+        }
+        let targets = self.ready_targets(&servers, |_| true).await;
+        let Some(t) = targets.first() else { return Ok(Vec::new()) };
+        let method = "openidea/revisionDefinition";
+        let params = json!({
+            "textDocument": { "uri": uri::path_to_uri_string(path) },
+            "position": { "line": pos.line, "character": pos.col },
+            "text": text,
+        });
+        let request = t.run.peer.request::<Value, Value>(method, params, None);
+        let value = match tokio::time::timeout(DEFAULT_TIMEOUT, request).await {
+            Ok(Ok(value)) => value,
+            Ok(Err(RpcError::Server { code, .. })) if code == ide_jsonrpc::codes::METHOD_NOT_FOUND => return Ok(Vec::new()),
+            Ok(Err(e)) => return Err(rpc_err(&t.server.name, method, e)),
+            Err(_) => return Err(rpc_err(&t.server.name, method, RpcError::Timeout)),
+        };
+        let response: lsp::GotoDefinitionResponse = serde_json::from_value(value)
+            .map_err(|e| IdeError::new(ErrorKind::Protocol, format!("{method}: {e}")))?;
+        Ok(convert::goto_response(&self.conv(t.enc()), response))
+    }
+
     /// Go to Implementation, with the implementations found first passed to `partial` while
     /// the search goes on: jdtls answers from the project's sources quickly, then searches every
     /// dependency jar for a type declared in one. Returns them all, the first ones first.

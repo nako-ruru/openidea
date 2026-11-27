@@ -2145,6 +2145,10 @@ impl DocumentObserver for LspObserver {
             return;
         }
         match &info.uri {
+            // A revision blob is served by the server's own revision request
+            // (see `revision_targets`), never opened as a document: its
+            // `git-revision:` URI names no file the server could analyse.
+            Some(uri) if uri.starts_with("git-revision:") => {}
             Some(uri) => self.0.did_open_virtual(info.id, uri, &info.language, info.version, &info.text),
             None => self.0.did_open(info.id, &info.path, &info.language, info.version, &info.text),
         }
