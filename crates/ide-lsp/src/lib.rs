@@ -1829,6 +1829,36 @@ impl LspManager {
         Ok(response.map(|response| convert::goto_response(&self.conv(t.enc()), response)).unwrap_or_default())
     }
 
+    /// Builds and caches a revision's HEAD snapshot before the first hover or
+    /// click. Best effort: a server without the request is left alone.
+    pub async fn revision_prepare(&self, language: &LanguageId, path: &Path, text: &str) -> IdeResult<()> {
+        let servers = self.servers_for(language, path);
+        if servers.is_empty() {
+            return Ok(());
+        }
+        for server in &servers {
+            self.ensure_started(server);
+        }
+        let targets = self.ready_targets(&servers, |_| true).await;
+        let Some(t) = targets.first() else { return Ok(()) };
+        let params = json!({
+            "textDocument": { "uri": uri::path_to_uri_string(path) },
+            "text": text,
+        });
+        let request = t.run.peer.request::<Value, Value>("openidea/revisionPrepare", params, None);
+        let _ = tokio::time::timeout(DEFAULT_TIMEOUT, request).await;
+        Ok(())
+    }
+
+    /// [`Self::revision_prepare`] on the manager's runtime: the document
+    /// observer is synchronous and a Go project must start in the background.
+    pub fn revision_prepare_background(self: &Arc<Self>, language: LanguageId, path: PathBuf, text: String) {
+        let lsp = self.clone();
+        self.runtime.spawn(async move {
+            let _ = lsp.revision_prepare(&language, &path, &text).await;
+        });
+    }
+
     /// Go to Implementation, with the implementations found first passed to `partial` while
     /// the search goes on: jdtls answers from the project's sources quickly, then searches every
     /// dependency jar for a type declared in one. Returns them all, the first ones first.

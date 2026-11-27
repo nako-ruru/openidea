@@ -2148,7 +2148,13 @@ impl DocumentObserver for LspObserver {
             // A revision blob is served by the server's own revision request
             // (see `revision_targets`), never opened as a document: its
             // `git-revision:` URI names no file the server could analyse.
-            Some(uri) if uri.starts_with("git-revision:") => {}
+            // Warm its HEAD snapshot while the pane opens, so the first hover
+            // or click does not pay the package's first analysis.
+            Some(uri) if uri.starts_with("git-revision:") => {
+                if let Ok(path) = crate::ops::vcs::revision_blob_path(uri) {
+                    self.0.revision_prepare_background(info.language.clone(), path, info.text.clone());
+                }
+            }
             Some(uri) => self.0.did_open_virtual(info.id, uri, &info.language, info.version, &info.text),
             None => self.0.did_open(info.id, &info.path, &info.language, info.version, &info.text),
         }
