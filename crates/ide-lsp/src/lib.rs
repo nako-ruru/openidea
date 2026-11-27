@@ -1823,9 +1823,10 @@ impl LspManager {
             Ok(Err(e)) => return Err(rpc_err(&t.server.name, method, e)),
             Err(_) => return Err(rpc_err(&t.server.name, method, RpcError::Timeout)),
         };
-        let response: lsp::GotoDefinitionResponse = serde_json::from_value(value)
+        // A missing definition is `null`, not an empty array.
+        let response: Option<lsp::GotoDefinitionResponse> = serde_json::from_value(value)
             .map_err(|e| IdeError::new(ErrorKind::Protocol, format!("{method}: {e}")))?;
-        Ok(convert::goto_response(&self.conv(t.enc()), response))
+        Ok(response.map(|response| convert::goto_response(&self.conv(t.enc()), response)).unwrap_or_default())
     }
 
     /// Go to Implementation, with the implementations found first passed to `partial` while
