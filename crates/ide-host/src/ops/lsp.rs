@@ -478,8 +478,9 @@ fn map_line(old: &str, new: &str, line: u32) -> u32 {
 
 /// Navigates inside a Git revision's blob through the project's own server:
 /// the server analyses HEAD's text in a snapshot of its own, so the workspace
-/// document and its servers stay untouched. `None` when the language has no
-/// revision support yet, leaving the ordinary path to answer.
+/// document and its servers stay untouched. Any language can answer the
+/// generic revision request; a server without it returns "method not found"
+/// and the request ends with no target, leaving the ordinary path to answer.
 async fn revision_targets(
     host: &Host,
     window: &str,
@@ -489,10 +490,6 @@ async fn revision_targets(
 ) -> IdeResult<Option<Vec<Location>>> {
     let project = host.project(window)?;
     let vd = crate::ops::vcs::revision_virtual_document(host, window, uri, None).await?;
-    // Only Go for now: gopls's revision request analyses the blob in place.
-    if vd.language_id.as_str() != "go" {
-        return Ok(None);
-    }
     let path = crate::ops::vcs::revision_blob_path(uri)?;
     let mut targets = project.lsp.revision_definition(&vd.language_id, &path, &vd.text, pos).await?;
     // A target in the same blob carries HEAD's line numbers, while the editor
