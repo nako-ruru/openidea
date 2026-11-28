@@ -139,10 +139,37 @@ export const activeUsageSearch = (s: UsagesState): UsageSearch | null =>
 
 const MAX_TABS = 8;
 
-/** Shows `search` in a new tab, or in place of the selected one unless that is pinned. */
+// ---------------------------------------------------------------------------
+// View options (persisted toggle in the tool window's ⋮ menu).
+
+const OPTIONS_KEY = "openidea.usages.view.v1";
+
+export const useUsagesOptions = create<{ preview: boolean; openInNewTab: boolean }>(() => {
+  try {
+    return {
+      preview: true,
+      openInNewTab: false,
+      ...JSON.parse(globalThis.localStorage?.getItem(OPTIONS_KEY) ?? "{}"),
+    };
+  } catch {
+    return { preview: true, openInNewTab: false };
+  }
+});
+
+useUsagesOptions.subscribe((s) => {
+  try {
+    globalThis.localStorage?.setItem(OPTIONS_KEY, JSON.stringify(s));
+  } catch {
+    /* storage unavailable */
+  }
+});
+
+/** Shows `search` in a new tab, or in place of the selected one unless that is pinned
+ * (or "Open Results in New Tab" is on). */
 export function openUsageTab(search: UsageSearch) {
+  const alwaysNew = useUsagesOptions.getState().openInNewTab;
   useUsages.setState((s) => {
-    const reused = s.tabs.find((t) => t.id === s.active && !t.pinned);
+    const reused = alwaysNew ? undefined : s.tabs.find((t) => t.id === s.active && !t.pinned);
     const tabs = reused ? s.tabs.map((t) => (t === reused ? search : t)) : [...s.tabs, search];
     return { tabs: tabs.slice(-MAX_TABS), active: search.id };
   });

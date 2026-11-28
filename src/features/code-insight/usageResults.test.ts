@@ -45,6 +45,7 @@ const {
   resetUsages,
   showUsageResults,
   useUsages,
+  useUsagesOptions,
 } = await import("./usages");
 
 describe("showUsageResults", () => {
@@ -229,6 +230,22 @@ describe("usage tabs", () => {
     expect(activeUsageSearch(useUsages.getState())?.id).toBe(103);
     openUsageTab(search(104));
     expect(useUsages.getState().tabs.map((t) => t.id)).toEqual([102, 104]);
+  });
+
+  it("open a new tab per search when Open Results in New Tab is on", () => {
+    resetUsages();
+    useUsagesOptions.setState({ openInNewTab: true });
+    try {
+      openUsageTab(search(105));
+      openUsageTab(search(106));
+      expect(useUsages.getState().tabs.map((t) => t.id)).toEqual([105, 106]);
+      expect(activeUsageSearch(useUsages.getState())?.id).toBe(106);
+      openUsageTab(search(107));
+      expect(useUsages.getState().tabs.map((t) => t.id)).toEqual([105, 106, 107]);
+    } finally {
+      useUsagesOptions.setState({ openInNewTab: false });
+      resetUsages();
+    }
   });
 
   it("take the tool window and its stripe button away with the last one", () => {

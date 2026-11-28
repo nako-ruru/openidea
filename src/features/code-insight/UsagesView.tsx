@@ -41,6 +41,7 @@ import {
   trimPreview,
   usageCount,
   useUsages,
+  useUsagesOptions,
   type Usage,
   type UsageGroup,
   type UsageSearch,
@@ -468,35 +469,24 @@ export function UsagesView() {
 }
 
 // ---------------------------------------------------------------------------
-// Preview pane (persisted toggle in the ⋮ menu; on by default, like the Find tool window's).
-
-const OPTIONS_KEY = "openidea.usages.view.v1";
-
-export const useUsagesOptions = create<{ preview: boolean }>(() => {
-  try {
-    return { preview: true, ...JSON.parse(globalThis.localStorage?.getItem(OPTIONS_KEY) ?? "{}") };
-  } catch {
-    return { preview: true };
-  }
-});
-
-useUsagesOptions.subscribe((s) => {
-  try {
-    globalThis.localStorage?.setItem(OPTIONS_KEY, JSON.stringify(s));
-  } catch {
-    /* storage unavailable */
-  }
-});
+// ⋮ menu entries (options live with the tab model in ./usages).
 
 /** The Find Usages tool window's ⋮ menu entries. */
 export function useUsagesHeaderMenu(): MenuItem[] {
   const preview = useUsagesOptions((s) => s.preview);
+  const openInNewTab = useUsagesOptions((s) => s.openInNewTab);
   return [
     {
       id: "preview",
       label: "Preview Source",
       checked: preview,
       run: () => useUsagesOptions.setState({ preview: !preview }),
+    },
+    {
+      id: "openInNewTab",
+      label: "Open Results in New Tab",
+      checked: openInNewTab,
+      run: () => useUsagesOptions.setState({ openInNewTab: !openInNewTab }),
     },
   ];
 }
