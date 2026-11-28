@@ -1910,10 +1910,18 @@ impl LspManager {
         let mut docs = self.docs.lock();
         let path = docs.get(&doc).map(|d| d.path.clone());
         let Some(path) = path else { return };
-        if self.swapped.lock().get(&path).is_some_and(|s| s.text.as_str() == text) {
-            return;
-        }
-        let previous = docs.get(&doc).map(|d| d.text.clone()).unwrap_or_else(|| Arc::new(DocText::new("")));
+        // The working copy to restore: the entry's, if one is already swapped
+        // (its text is the revision's now), else the document's own.
+        let previous = match self.swapped.lock().get(&path).map(|s| s.text.clone()) {
+            Some(working) => {
+                // The document already holds this revision: nothing to send.
+                if docs.get(&doc).is_some_and(|d| d.text.as_str() == text) {
+                    return;
+                }
+                working
+            }
+            None => docs.get(&doc).map(|d| d.text.clone()).unwrap_or_else(|| Arc::new(DocText::new(""))),
+        };
         let version = self.next_version(&path, docs.get(&doc).map_or(0, |d| d.version));
         if let Some(d) = docs.get_mut(&doc) {
             d.version = version;
