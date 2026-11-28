@@ -1492,6 +1492,7 @@ impl LspManager {
                 tracing::debug!("{}: didChange: {e}", server.name);
             }
         }
+        let (shared_path, shared_text) = (d.path.clone(), d.text.clone());
         let compose_changed = if d.language.as_str() == "yaml" && !compose::is_named_compose_file(&d.path) {
             let now = compose::is_compose_content(text.as_str());
             let changed = std::mem::replace(&mut d.compose_detected, now) != now;
@@ -1502,7 +1503,6 @@ impl LspManager {
         };
         // The same file can be open twice (an editor tab and a diff pane): they
         // share one server document, so they must share its text.
-        let (shared_path, shared_text) = (d.path.clone(), d.text.clone());
         drop(docs);
         {
             let mut all = self.docs.lock();
