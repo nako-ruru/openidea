@@ -373,6 +373,7 @@ pub async fn lsp_hover(
 ) -> IdeResult<Option<Hover>> {
     let lsp = host.project(window)?.lsp.clone();
     let (target, cancel) = begin_position_request(host, window, request, doc, pos).await?;
+    tracing::info!("hover: doc={doc} target={target} line={} col={}", pos.line, pos.col);
     let Some((plugins, d)) = plugin_providers(host, window, doc, ProviderKind::Hover) else {
         let result = lsp.hover(target, pos, cancel).await;
         host.end_request(request);
