@@ -178,19 +178,34 @@ struct DocState {
 /// Sends the document's current text to every server that has it open, as one
 /// full-text change at the document's version.
 fn send_full_text(d: &DocState, text: &str) {
+    let (mut sent, mut skipped) = (0, 0);
     for a in &d.servers {
-        let Some(run) = a.server.running() else { continue };
+        let Some(run) = a.server.running() else {
+            skipped += 1;
+            continue;
+        };
         if a.opened_gen != Some(run.generation) || run.caps.read().sync == SyncKind::None {
+            skipped += 1;
             continue;
         }
         let params = json!({
             "textDocument": { "uri": d.uri, "version": d.version },
             "contentChanges": [{ "text": text }],
         });
-        if let Err(e) = run.peer.notify("textDocument/didChange", params) {
-            tracing::debug!("{}: didChange (revision): {e}", a.server.name);
+        match run.peer.notify("textDocument/didChange", params) {
+            Ok(()) => sent += 1,
+            Err(e) => {
+                skipped += 1;
+                tracing::debug!("{}: didChange (revision): {e}", a.server.name);
+            }
         }
     }
+    tracing::info!(
+        "revision: didChange uri={} version={} len={} sent={sent} skipped={skipped}",
+        d.uri,
+        d.version,
+        text.len()
+    );
 }
 
 struct ClosingLabels {
@@ -1889,6 +1904,7 @@ impl LspManager {
         let previous = d.text.clone();
         d.version = self.next_version(&d.path, d.version);
         d.text = Arc::new(DocText::new(text));
+        tracing::info!("revision: swap doc={doc} path={} version={}", d.path.display(), d.version);
         send_full_text(d, text);
         self.swapped.lock().insert(d.path.clone(), SwappedRevision { text: previous });
     }
@@ -1897,6 +1913,7 @@ impl LspManager {
     /// revision request is still running on the document).
     fn restore_revision(&self, doc: DocId) -> bool {
         if self.revision_busy.lock().contains(&doc) {
+            tracing::info!("revision: restore doc={doc} skipped (request in flight)");
             return false;
         }
         let mut docs = self.docs.lock();
@@ -1905,6 +1922,7 @@ impl LspManager {
         d.version = self.next_version(&d.path, d.version);
         d.text = state.text;
         let text = d.text.clone();
+        tracing::info!("revision: restore doc={doc} path={} version={}", d.path.display(), d.version);
         send_full_text(d, text.as_str());
         true
     }

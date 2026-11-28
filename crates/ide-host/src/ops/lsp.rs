@@ -494,8 +494,10 @@ async fn revision_targets(
     // The working copy is the document the server analyses (the diff's own right
     // pane opens it). Without it there is nothing to swap: no jump.
     let Some(working) = project.documents.by_path(&path) else {
+        tracing::info!("revision: no working document for {}", path.display());
         return Ok(Some(Vec::new()));
     };
+    tracing::info!("revision: target doc={working} path={}", path.display());
     let mut targets = project.lsp.revision_definition(working, &vd.text, pos).await?;
     // A target in the same blob carries HEAD's line numbers, while the editor
     // opens the working copy: translate them through the file's own diff.
