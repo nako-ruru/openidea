@@ -202,7 +202,7 @@ fn send_full_text(d: &DocState, text: &str) {
     }
     tracing::info!(
         "revision: didChange uri={} version={} len={} sent={sent} skipped={skipped}",
-        d.uri,
+        d.uri.as_str(),
         d.version,
         text.len()
     );
