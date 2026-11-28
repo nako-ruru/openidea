@@ -136,6 +136,12 @@ struct Attached {
     opened_gen: Option<u64>,
 }
 
+/// A document whose text the server currently holds as a Git revision's.
+struct SwappedRevision {
+    /// The working copy's text, to put back when it is needed again.
+    text: Arc<DocText>,
+}
+
 struct DocState {
     path: PathBuf,
     /// `path` with links resolved, to recognise a document under another name.
@@ -154,6 +160,24 @@ struct DocState {
     flutter_outline: Option<FlutterOutline>,
     /// The Dart server's closing labels for the current text; dropped on the next change.
     closing_labels: Option<ClosingLabels>,
+}
+
+/// Sends the document's current text to every server that has it open, as one
+/// full-text change at the document's version.
+fn send_full_text(d: &DocState, text: &str) {
+    for a in &d.servers {
+        let Some(run) = a.server.running() else { continue };
+        if a.opened_gen != Some(run.generation) || run.caps.read().sync == SyncKind::None {
+            continue;
+        }
+        let params = json!({
+            "textDocument": { "uri": d.uri, "version": d.version },
+            "contentChanges": [{ "text": text }],
+        });
+        if let Err(e) = run.peer.notify("textDocument/didChange", params) {
+            tracing::debug!("{}: didChange (revision): {e}", a.server.name);
+        }
+    }
 }
 
 struct ClosingLabels {
@@ -262,6 +286,12 @@ pub struct LspManager {
     runtime: tokio::runtime::Handle,
     servers: Mutex<Vec<Arc<Server>>>,
     docs: Mutex<HashMap<DocId, DocState>>,
+    /// Documents whose text is currently a Git revision's, so the working copy
+    /// can be put back when a request or edit needs it again.
+    swapped: Mutex<HashMap<PathBuf, SwappedRevision>>,
+    /// Documents with a revision definition in flight: their swap must survive
+    /// that request, even though the request asks for their targets.
+    revision_busy: Mutex<std::collections::HashSet<DocId>>,
     apply_edit_hook: RwLock<Option<ApplyEditHook>>,
     applied_edits: tokio::sync::broadcast::Sender<(ide_core::ServerId, WorkspaceEdit)>,
     config_hook: RwLock<Option<ConfigHook>>,
@@ -554,6 +584,8 @@ impl LspManager {
             runtime: runtime_handle(),
             servers: Mutex::new(Vec::new()),
             docs: Mutex::new(HashMap::new()),
+            swapped: Mutex::new(HashMap::new()),
+            revision_busy: Mutex::new(std::collections::HashSet::new()),
             apply_edit_hook: RwLock::new(None),
             applied_edits: tokio::sync::broadcast::channel(64).0,
             config_hook: RwLock::new(None),
@@ -1320,6 +1352,7 @@ impl LspManager {
             let already_detected =
                 compose_detected && docs.values().any(|d| d.compose_detected && d.path == state.path);
             let params = state.did_open_params();
+            let opened_path = state.path.clone();
             for a in &mut state.servers {
                 if let Some(run) = a.server.running() {
                     if run.caps.read().open_close {
@@ -1329,6 +1362,7 @@ impl LspManager {
                 }
             }
             docs.insert(doc, state);
+            self.swapped.lock().remove(&opened_path);
             compose_detected && !already_detected
         };
         self.schedule_pull(doc, None, Duration::ZERO);
@@ -1357,10 +1391,17 @@ impl LspManager {
     }
 
     pub fn did_change(&self, doc: DocId, version: u32, changes: &[AppliedChange], full_text: &dyn Fn() -> String) {
+        let restored = self.restore_revision(doc);
         let _gate = self.injections.gate.lock();
         let mut docs = self.docs.lock();
         let Some(d) = docs.get_mut(&doc) else { return };
-        d.version = version as i32;
+        // The restore above bumped the version the server has; the editor's own
+        // change must stay above it, or the server drops it as stale.
+        d.version = if restored {
+            (version as i32).max(d.version.saturating_add(1))
+        } else {
+            version as i32
+        };
         d.changed = std::time::Instant::now();
         d.closing_labels = None;
 
@@ -1501,6 +1542,7 @@ impl LspManager {
         if compose_removed && let Some(me) = self.me.upgrade() {
             me.reconfigure_soon();
         }
+        self.swapped.lock().remove(&d.path);
         for a in &d.servers {
             self.forget_pulled(&a.server, &d.path, a.server.running().as_ref());
             let Some(run) = a.server.running() else { continue };
@@ -1558,6 +1600,8 @@ impl LspManager {
         feature: &str,
         pred: impl Fn(&ServerCaps) -> bool,
     ) -> IdeResult<(DocSnap, Vec<Target>)> {
+        // A request on the working copy means the revision text must go.
+        self.restore_revision(doc);
         let snap = self.snapshot(doc)?;
         let targets = self.ready_targets(&snap.servers, pred).await;
         if targets.is_empty() {
@@ -1791,71 +1835,60 @@ impl LspManager {
         self.goto_in(&snap, &targets, method, pos, None, None).await
     }
 
-    /// Resolves a definition in a Git revision's text through the server's own
-    /// revision request. The server analyses that text in a snapshot of its own,
-    /// so the workspace document (and its overlays) is untouched. A server
-    /// without the request (stock gopls) answers "method not found": no jump.
-    pub async fn revision_definition(
-        &self,
-        language: &LanguageId,
-        path: &Path,
-        text: &str,
-        pos: Pos,
-    ) -> IdeResult<Vec<Location>> {
-        let servers = self.servers_for(language, path);
-        // A revision pane may be the only Go view open: start the project's
-        // server rather than answering "no jump" just because nothing else did.
-        for server in &servers {
-            self.ensure_started(server);
+    /// Answers a definition inside a Git revision's text by swapping the working
+    /// document in the server, the way a second isolated analysis would: the
+    /// revision text stays in place while the diff pane is in use, and the
+    /// working copy returns on the next request or edit that needs it.
+    pub async fn revision_definition(&self, doc: DocId, text: &str, pos: Pos) -> IdeResult<Vec<Location>> {
+        self.revision_busy.lock().insert(doc);
+        let result = async {
+            self.swap_revision_text(doc, text);
+            self.goto(doc, pos, GotoKind::Definition).await
         }
-        let targets = self.ready_targets(&servers, |_| true).await;
-        let Some(t) = targets.first() else { return Ok(Vec::new()) };
-        let method = "openidea/revisionDefinition";
-        let params = json!({
-            "textDocument": { "uri": uri::path_to_uri_string(path) },
-            "position": { "line": pos.line, "character": pos.col },
-            "text": text,
-        });
-        let request = t.run.peer.request::<Value, Value>(method, params, None);
-        let value = match tokio::time::timeout(DEFAULT_TIMEOUT, request).await {
-            Ok(Ok(value)) => value,
-            Ok(Err(RpcError::Server { code, .. })) if code == ide_jsonrpc::codes::METHOD_NOT_FOUND => return Ok(Vec::new()),
-            Ok(Err(e)) => return Err(rpc_err(&t.server.name, method, e)),
-            Err(_) => return Err(rpc_err(&t.server.name, method, RpcError::Timeout)),
-        };
-        // A missing definition is `null`, not an empty array.
-        let response: Option<lsp::GotoDefinitionResponse> = serde_json::from_value(value)
-            .map_err(|e| IdeError::new(ErrorKind::Protocol, format!("{method}: {e}")))?;
-        Ok(response.map(|response| convert::goto_response(&self.conv(t.enc()), response)).unwrap_or_default())
+        .await;
+        self.revision_busy.lock().remove(&doc);
+        self.arm_revision_restore(doc);
+        result
     }
 
-    /// Builds and caches a revision's HEAD snapshot before the first hover or
-    /// click. Best effort: a server without the request is left alone.
-    pub async fn revision_prepare(&self, language: &LanguageId, path: &Path, text: &str) -> IdeResult<()> {
-        let servers = self.servers_for(language, path);
-        if servers.is_empty() {
-            return Ok(());
+    /// Sends `text` as the document's content, keeping the working copy to
+    /// restore. Same document, same version counter: nothing else changes.
+    fn swap_revision_text(&self, doc: DocId, text: &str) {
+        let mut docs = self.docs.lock();
+        let Some(d) = docs.get_mut(&doc) else { return };
+        if self.swapped.lock().get(&d.path).is_some_and(|s| s.text.as_str() == text) {
+            return;
         }
-        for server in &servers {
-            self.ensure_started(server);
-        }
-        let targets = self.ready_targets(&servers, |_| true).await;
-        let Some(t) = targets.first() else { return Ok(()) };
-        let params = json!({
-            "textDocument": { "uri": uri::path_to_uri_string(path) },
-            "text": text,
-        });
-        let request = t.run.peer.request::<Value, Value>("openidea/revisionPrepare", params, None);
-        let _ = tokio::time::timeout(DEFAULT_TIMEOUT, request).await;
-        Ok(())
+        let previous = d.text.clone();
+        d.version = d.version.saturating_add(1);
+        d.text = Arc::new(DocText::new(text));
+        send_full_text(d, text);
+        self.swapped.lock().insert(d.path.clone(), SwappedRevision { text: previous });
     }
 
-    /// [`Self::revision_prepare`] on the manager's runtime: the document
-    /// observer is synchronous and a Go project must start in the background.
-    pub fn revision_prepare_background(self: &Arc<Self>, language: LanguageId, path: PathBuf, text: String) {
-        let lsp = self.clone();
+    /// Puts the working copy back. False when there was nothing to restore (or a
+    /// revision request is still running on the document).
+    fn restore_revision(&self, doc: DocId) -> bool {
+        if self.revision_busy.lock().contains(&doc) {
+            return false;
+        }
+        let mut docs = self.docs.lock();
+        let Some(d) = docs.get_mut(&doc) else { return false };
+        let Some(state) = self.swapped.lock().remove(&d.path) else { return false };
+        d.version = d.version.saturating_add(1);
+        d.text = state.text;
+        let text = d.text.clone();
+        send_full_text(d, text.as_str());
+        true
+    }
+
+    /// Restores after a quiet spell, so a diff left open does not keep the
+    /// editor's document swapped.
+    fn arm_revision_restore(&self, doc: DocId) {
+        let Some(me) = self.me.upgrade() else { return };
         self.runtime.spawn(async move {
-            let _ = lsp.revision_prepare(&language, &path, &text).await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            me.restore_revision(doc);
         });
     }
 

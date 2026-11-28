@@ -491,7 +491,12 @@ async fn revision_targets(
     let project = host.project(window)?;
     let vd = crate::ops::vcs::revision_virtual_document(host, window, uri, None).await?;
     let path = crate::ops::vcs::revision_blob_path(uri)?;
-    let mut targets = project.lsp.revision_definition(&vd.language_id, &path, &vd.text, pos).await?;
+    // The working copy is the document the server analyses (the diff's own right
+    // pane opens it). Without it there is nothing to swap: no jump.
+    let Some(working) = project.documents.by_path(&path) else {
+        return Ok(Some(Vec::new()));
+    };
+    let mut targets = project.lsp.revision_definition(working, &vd.text, pos).await?;
     // A target in the same blob carries HEAD's line numbers, while the editor
     // opens the working copy: translate them through the file's own diff.
     if let Some(working) = working_text(&project, &path) {
