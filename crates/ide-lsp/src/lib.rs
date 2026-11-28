@@ -1492,7 +1492,6 @@ impl LspManager {
                 tracing::debug!("{}: didChange: {e}", server.name);
             }
         }
-        let (shared_path, shared_text) = (d.path.clone(), d.text.clone());
         let compose_changed = if d.language.as_str() == "yaml" && !compose::is_named_compose_file(&d.path) {
             let now = compose::is_compose_content(text.as_str());
             let changed = std::mem::replace(&mut d.compose_detected, now) != now;
@@ -1506,8 +1505,11 @@ impl LspManager {
         drop(docs);
         {
             let mut all = self.docs.lock();
-            for other in all.values_mut().filter(|o| o.path == shared_path) {
-                other.text = shared_text.clone();
+            let shared = all.get(&doc).map(|d| (d.path.clone(), d.text.clone()));
+            if let Some((path, text)) = shared {
+                for other in all.values_mut().filter(|o| o.path == path) {
+                    other.text = text.clone();
+                }
             }
         }
         if compose_changed && let Some(me) = self.me.upgrade() {
