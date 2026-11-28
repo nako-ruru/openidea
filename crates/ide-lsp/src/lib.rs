@@ -1500,7 +1500,16 @@ impl LspManager {
         } else {
             false
         };
+        // The same file can be open twice (an editor tab and a diff pane): they
+        // share one server document, so they must share its text.
+        let (shared_path, shared_text) = (d.path.clone(), d.text.clone());
         drop(docs);
+        {
+            let mut all = self.docs.lock();
+            for other in all.values_mut().filter(|o| o.path == shared_path) {
+                other.text = shared_text.clone();
+            }
+        }
         if compose_changed && let Some(me) = self.me.upgrade() {
             me.reconfigure_soon();
         }
@@ -1897,33 +1906,42 @@ impl LspManager {
     /// restore. Same document, same version counter: nothing else changes.
     fn swap_revision_text(&self, doc: DocId, text: &str) {
         let mut docs = self.docs.lock();
-        let Some(d) = docs.get_mut(&doc) else { return };
-        if self.swapped.lock().get(&d.path).is_some_and(|s| s.text.as_str() == text) {
+        let path = docs.get(&doc).map(|d| d.path.clone());
+        let Some(path) = path else { return };
+        if self.swapped.lock().get(&path).is_some_and(|s| s.text.as_str() == text) {
             return;
         }
-        let previous = d.text.clone();
-        d.version = self.next_version(&d.path, d.version);
-        d.text = Arc::new(DocText::new(text));
-        tracing::info!("revision: swap doc={doc} path={} version={}", d.path.display(), d.version);
-        send_full_text(d, text);
-        self.swapped.lock().insert(d.path.clone(), SwappedRevision { text: previous });
+        let previous = docs.get(&doc).map(|d| d.text.clone()).unwrap_or_else(|| Arc::new(DocText::new("")));
+        let version = self.next_version(&path, docs.get(&doc).map_or(0, |d| d.version));
+        if let Some(d) = docs.get_mut(&doc) {
+            d.version = version;
+            d.text = Arc::new(DocText::new(text));
+            tracing::info!("revision: swap doc={doc} path={} version={}", d.path.display(), d.version);
+            send_full_text(d, text);
+        }
+        self.swapped.lock().insert(path, SwappedRevision { text: previous });
     }
 
-    /// Puts the working copy back. False when there was nothing to restore (or a
-    /// revision request is still running on the document).
+    /// Puts the working copy back on every document of the file: they share one
+    /// server document, so they must share one text and one version too.
     fn restore_revision(&self, doc: DocId) -> bool {
         if self.revision_busy.lock().contains(&doc) {
             tracing::info!("revision: restore doc={doc} skipped (request in flight)");
             return false;
         }
         let mut docs = self.docs.lock();
-        let Some(d) = docs.get_mut(&doc) else { return false };
-        let Some(state) = self.swapped.lock().remove(&d.path) else { return false };
-        d.version = self.next_version(&d.path, d.version);
-        d.text = state.text;
-        let text = d.text.clone();
-        tracing::info!("revision: restore doc={doc} path={} version={}", d.path.display(), d.version);
-        send_full_text(d, text.as_str());
+        let Some(path) = docs.get(&doc).map(|d| d.path.clone()) else { return false };
+        let Some(state) = self.swapped.lock().remove(&path) else { return false };
+        let version = self.next_version(&path, 0);
+        for other in docs.values_mut().filter(|d| d.path == path) {
+            other.text = state.text.clone();
+            other.version = version;
+        }
+        // Send through the document the request came from: it is open on the
+        // servers. Every document of the file now holds the same text.
+        let Some(caller) = docs.get_mut(&doc) else { return false };
+        tracing::info!("revision: restore path={} version={version}", caller.path.display());
+        send_full_text(caller, caller.text.as_str());
         true
     }
 
